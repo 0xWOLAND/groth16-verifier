@@ -3,6 +3,7 @@ members = [
     "verifier",
     "example/script",
     "example/program",
+    "example/anchor/programs/*",
     "example/sp1-program",
 ]
 resolver = "2"
