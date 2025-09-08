@@ -1,0 +1,20 @@
+[package]
+name = "pinocchio-fibonacci-verifier-contract"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+cpi = ["no-entrypoint"]
+test-sbf = []
+default = []
+
+[dependencies]
+pinocchio.workspace = true
+five8_const.workspace = true
+sp1-solana.workspace = true
+hex-literal.workspace = true
