@@ -1,5 +1,6 @@
 # Build output
 target/
+.anchor/
 
 # Node modules
 **/*/node_modules
