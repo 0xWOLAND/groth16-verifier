@@ -38,6 +38,3 @@ sp1-build = "5.0.0"
 # pinocchio
 pinocchio = { git = "https://github.com/anza-xyz/pinocchio" }
 five8_const = "0.1.3"
-mollusk-svm = { git = "https://github.com/anza-xyz/mollusk" }
-spl-token = "6.0.0"
-hex-literal = "0.3.1"

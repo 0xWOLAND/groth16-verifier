@@ -9,12 +9,8 @@ crate-type = ["cdylib", "lib"]
 
 [features]
 no-entrypoint = []
-cpi = ["no-entrypoint"]
-test-sbf = []
-default = []
 
 [dependencies]
 pinocchio.workspace = true
 five8_const.workspace = true
 sp1-solana.workspace = true
-hex-literal.workspace = true
