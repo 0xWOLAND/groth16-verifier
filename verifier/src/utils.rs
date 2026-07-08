@@ -32,6 +32,8 @@ pub enum Error {
     PairingError,
     #[error("Invalid input")]
     InvalidInput,
+    #[error("Invalid data")]
+    InvalidData,
     #[error("Borsh serialization error")]
     BorshSerializeError,
     #[error("Borsh deserialization error")]
@@ -40,6 +42,10 @@ pub enum Error {
     IoError,
     #[error("Groth16 vkey hash mismatch")]
     Groth16VkeyHashMismatch,
+    #[error("Vkey root mismatch")]
+    VkeyRootMismatch,
+    #[error("Exit code mismatch")]
+    ExitCodeMismatch,
     #[error("Invalid program vkey hash")]
     InvalidProgramVkeyHash,
 }
@@ -47,6 +53,8 @@ pub enum Error {
 const SCALAR_LEN: usize = 32;
 const G1_LEN: usize = 64;
 const G2_LEN: usize = 128;
+pub(crate) const GROTH16_PROOF_LENGTH: usize = 256;
+pub(crate) const SP1_GROTH16_HEADER_LENGTH: usize = 4 + 32 + 32 + 32;
 
 /// Everything needed to verify a Groth16 proof.
 #[allow(dead_code)]
@@ -177,6 +185,10 @@ fn negate_g1(g1_bytes: &[u8; 64]) -> Result<[u8; 64], Error> {
 }
 
 pub(crate) fn load_proof_from_bytes(buffer: &[u8]) -> Result<Proof, Error> {
+    if buffer.len() != GROTH16_PROOF_LENGTH {
+        return Err(Error::InvalidData);
+    }
+
     Ok(Proof {
         pi_a: negate_g1(
             &buffer[..64]
@@ -194,6 +206,10 @@ pub(crate) fn load_proof_from_bytes(buffer: &[u8]) -> Result<Proof, Error> {
 pub(crate) fn load_groth16_verifying_key_from_bytes(
     buffer: &[u8],
 ) -> Result<VerificationKey, Error> {
+    if buffer.len() < 292 {
+        return Err(Error::InvalidData);
+    }
+
     // Note that g1_beta and g1_delta are not used in the verification process.
     let g1_alpha = decompress_g1(buffer[..32].try_into().unwrap())?;
     let g2_beta = decompress_g2(buffer[64..128].try_into().unwrap())?;
@@ -203,30 +219,13 @@ pub(crate) fn load_groth16_verifying_key_from_bytes(
     let num_k = u32::from_be_bytes([buffer[288], buffer[289], buffer[290], buffer[291]]);
     let mut k = Vec::new();
     let mut offset = 292;
+    if (buffer.len() as u64) < (num_k as u64) * 32 + offset as u64 {
+        return Err(Error::InvalidData);
+    }
     for _ in 0..num_k {
         let point = decompress_g1(&buffer[offset..offset + 32].try_into().unwrap())?;
         k.push(point);
         offset += 32;
-    }
-
-    let num_of_array_of_public_and_commitment_committed = u32::from_be_bytes([
-        buffer[offset],
-        buffer[offset + 1],
-        buffer[offset + 2],
-        buffer[offset + 3],
-    ]);
-    offset += 4;
-    for _ in 0..num_of_array_of_public_and_commitment_committed {
-        let num = u32::from_be_bytes([
-            buffer[offset],
-            buffer[offset + 1],
-            buffer[offset + 2],
-            buffer[offset + 3],
-        ]);
-        offset += 4;
-        for _ in 0..num {
-            offset += 4;
-        }
     }
 
     Ok(VerificationKey {
@@ -235,25 +234,30 @@ pub(crate) fn load_groth16_verifying_key_from_bytes(
         vk_gamma_g2: g2_gamma,
         vk_delta_g2: g2_delta,
         vk_ic: k.clone(),
-        nr_pubinputs: num_of_array_of_public_and_commitment_committed,
+        nr_pubinputs: k.len().saturating_sub(1) as u32,
     })
 }
 
-pub(crate) fn load_public_inputs_from_bytes(buffer: &[u8]) -> Result<PublicInputs<2>, Error> {
-    let mut bytes = [0u8; 64];
-    bytes[1..].copy_from_slice(buffer); // vkey_hash is 31 bytes
-
-    Ok(PublicInputs::<2> {
-        inputs: [
-            bytes[..32].try_into().map_err(|_| Error::InvalidInput)?, // vkey_hash
-            bytes[32..].try_into().map_err(|_| Error::InvalidInput)?, // committed_values_digest
-        ],
-    })
+pub(crate) fn load_public_inputs<const N: usize>(
+    inputs: &[[u8; SCALAR_LEN]; N],
+) -> PublicInputs<N> {
+    PublicInputs::<N> { inputs: *inputs }
 }
 
 /// Hashes the public inputs in the same format as the Groth16 verifier.
 pub fn hash_public_inputs(public_inputs: &[u8]) -> [u8; 32] {
-    let mut result = Sha256::digest(public_inputs);
+    hash_public_inputs_with_fn(public_inputs, |input| Sha256::digest(input).into())
+}
+
+pub fn hash_public_inputs_blake3(public_inputs: &[u8]) -> [u8; 32] {
+    hash_public_inputs_with_fn(public_inputs, |input| *blake3::hash(input).as_bytes())
+}
+
+fn hash_public_inputs_with_fn<F>(public_inputs: &[u8], hash: F) -> [u8; 32]
+where
+    F: FnOnce(&[u8]) -> [u8; 32],
+{
+    let mut result = hash(public_inputs);
 
     // The Groth16 verifier operates over a 254 bit field (BN254), so we need to zero
     // out the first 3 bits. The same logic happens in the SP1 Ethereum verifier contract.
@@ -263,17 +267,43 @@ pub fn hash_public_inputs(public_inputs: &[u8]) -> [u8; 32] {
 }
 
 /// Formats the sp1 vkey hash and public inputs for use in the Groth16 verifier.
-pub fn groth16_public_values(sp1_vkey_hash: &[u8; 32], sp1_public_inputs: &[u8]) -> Vec<u8> {
-    let committed_values_digest = hash_public_inputs(sp1_public_inputs);
+pub fn groth16_public_values(
+    sp1_vkey_hash: [u8; 32],
+    sp1_public_inputs: &[u8],
+    exit_code: [u8; 32],
+    vk_root: [u8; 32],
+    proof_nonce: [u8; 32],
+) -> [[u8; 32]; 5] {
     [
-        sp1_vkey_hash[1..].to_vec(),
-        committed_values_digest.to_vec(),
+        sp1_vkey_hash,
+        hash_public_inputs(sp1_public_inputs),
+        exit_code,
+        vk_root,
+        proof_nonce,
     ]
-    .concat()
+}
+
+pub fn groth16_public_values_blake3(
+    sp1_vkey_hash: [u8; 32],
+    sp1_public_inputs: &[u8],
+    exit_code: [u8; 32],
+    vk_root: [u8; 32],
+    proof_nonce: [u8; 32],
+) -> [[u8; 32]; 5] {
+    [
+        sp1_vkey_hash,
+        hash_public_inputs_blake3(sp1_public_inputs),
+        exit_code,
+        vk_root,
+        proof_nonce,
+    ]
 }
 
 /// Decodes the sp1 vkey hash from the string from bytes32.
 pub fn decode_sp1_vkey_hash(sp1_vkey_hash: &str) -> Result<[u8; 32], Error> {
+    if sp1_vkey_hash.len() < 2 {
+        return Err(Error::InvalidProgramVkeyHash);
+    }
     let bytes = hex::decode(&sp1_vkey_hash[2..]).map_err(|_| Error::InvalidProgramVkeyHash)?;
     bytes.try_into().map_err(|_| Error::InvalidProgramVkeyHash)
 }
