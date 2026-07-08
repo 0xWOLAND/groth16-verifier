@@ -39,6 +39,8 @@ pub const GROTH16_VK_3_0_0_BYTES: &[u8] = include_bytes!("../vk/v3.0.0/groth16_v
 pub const GROTH16_VK_3_0_0_RC4_BYTES: &[u8] = include_bytes!("../vk/v3.0.0rc4/groth16_vk.bin");
 pub const GROTH16_VK_2_0_0_BYTES: &[u8] = include_bytes!("../vk/v2.0.0/groth16_vk.bin");
 
+/// VK root for SP1 circuit v6.1.0, embedded in Groth16 proof headers.
+/// This is tied to `SP1_CIRCUIT_VERSION`; SDK v6.1.0 through v6.3.1 use this same circuit.
 pub const VK_ROOT_6_1_0_BYTES: [u8; 32] =
     hex_literal::hex!("002f850ee998974d6cc00e50cd0814b098c05bfade466d28573240d057f25352");
 
@@ -133,6 +135,8 @@ pub fn verify_proof(
         return Ok(());
     }
 
+    // SP1 proofs may hash public values with SHA-256 or Blake3.
+    // Try SHA-256 first; a cross-hash collision is infeasible.
     let public_values = groth16_public_values_blake3(
         sp1_vkey_hash,
         sp1_public_inputs,
