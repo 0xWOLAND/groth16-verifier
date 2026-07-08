@@ -5,7 +5,7 @@
 //! # Example
 //! ```no_run
 //! use sp1_sdk::proof::SP1ProofWithPublicValues;
-//! use sp1_solana::{verify_proof, GROTH16_VK_2_0_0_BYTES};
+//! use sp1_solana::{verify_proof, GROTH16_VK_6_1_0_BYTES};
 //!
 //! // Load the sp1_proof_with_public_values from a file.
 //! let sp1_proof_with_public_values_file = "../proofs/fibonacci_proof.bin";
@@ -17,9 +17,9 @@
 //! let sp1_public_inputs = sp1_proof_with_public_values.public_values.to_vec();
 //!
 //! // Typically, the vkey hash is computed from `vk.bytes32()` on the SP1 program's vkey.
-//! let vkey_hash = "0x0083e8e370d7f0d1c463337f76c9a60b62ad7cc54c89329107c92c1e62097872";
+//! let vkey_hash = "0x009986cfea64a21abe25e985b2b2392d2fd0a6f1a144a04e78bf6b61d1f972fd";
 //!
-//! verify_proof(&proof_bytes, &sp1_public_inputs, &vkey_hash, &GROTH16_VK_2_0_0_BYTES).unwrap();
+//! verify_proof(&proof_bytes, &sp1_public_inputs, &vkey_hash, GROTH16_VK_6_1_0_BYTES).unwrap();
 //! ```
 
 use groth16_solana::groth16::Groth16Verifyingkey;
@@ -32,21 +32,29 @@ mod utils;
 use utils::*;
 
 /// Groth16 verification keys for different SP1 versions.
+pub const GROTH16_VK_6_1_0_BYTES: &[u8] = include_bytes!("../vk/v6.1.0/groth16_vk.bin");
 pub const GROTH16_VK_5_0_0_BYTES: &[u8] = include_bytes!("../vk/v5.0.0/groth16_vk.bin");
 pub const GROTH16_VK_4_0_0_RC3_BYTES: &[u8] = include_bytes!("../vk/v4.0.0-rc.3/groth16_vk.bin");
 pub const GROTH16_VK_3_0_0_BYTES: &[u8] = include_bytes!("../vk/v3.0.0/groth16_vk.bin");
 pub const GROTH16_VK_3_0_0_RC4_BYTES: &[u8] = include_bytes!("../vk/v3.0.0rc4/groth16_vk.bin");
 pub const GROTH16_VK_2_0_0_BYTES: &[u8] = include_bytes!("../vk/v2.0.0/groth16_vk.bin");
 
+pub const VK_ROOT_6_1_0_BYTES: [u8; 32] =
+    hex_literal::hex!("002f850ee998974d6cc00e50cd0814b098c05bfade466d28573240d057f25352");
+
 /// Verifies a proof using raw bytes, without any checks.
 ///
-/// The public inputs are the vkey hash and the commited values digest, concatenated.
+/// The public inputs are the five SP1 6.1 Groth16 field elements.
 /// The proof is a decompressed G1 element, followed by a decompressed G2 element, followed by a
 /// decompressed G1 element.
-pub fn verify_proof_raw(proof: &[u8], public_inputs: &[u8], vk: &[u8]) -> Result<(), Error> {
+pub fn verify_proof_raw<const N: usize>(
+    proof: &[u8],
+    public_inputs: &[[u8; 32]; N],
+    vk: &[u8],
+) -> Result<(), Error> {
     let proof = load_proof_from_bytes(proof)?;
     let vk = load_groth16_verifying_key_from_bytes(vk)?;
-    let public_inputs = load_public_inputs_from_bytes(public_inputs)?;
+    let public_inputs = load_public_inputs(public_inputs);
 
     let vk = Groth16Verifyingkey {
         nr_pubinputs: vk.nr_pubinputs as usize,
@@ -84,6 +92,10 @@ pub fn verify_proof(
     sp1_vkey_hash: &str,
     groth16_vk: &[u8],
 ) -> Result<(), Error> {
+    if proof.len() < SP1_GROTH16_HEADER_LENGTH + GROTH16_PROOF_LENGTH {
+        return Err(Error::InvalidData);
+    }
+
     // Hash the vk and get the first 4 bytes.
     let groth16_vk_hash: [u8; 4] = Sha256::digest(groth16_vk)[..4].try_into().unwrap();
 
@@ -97,11 +109,36 @@ pub fn verify_proof(
     }
 
     let sp1_vkey_hash = decode_sp1_vkey_hash(sp1_vkey_hash)?;
+    let exit_code: [u8; 32] = proof[4..36].try_into().map_err(|_| Error::InvalidData)?;
+    let vk_root: [u8; 32] = proof[36..68].try_into().map_err(|_| Error::InvalidData)?;
+    let proof_nonce: [u8; 32] = proof[68..100].try_into().map_err(|_| Error::InvalidData)?;
 
-    // Verify the proof.
-    verify_proof_raw(
-        &proof[4..],
-        &groth16_public_values(&sp1_vkey_hash, sp1_public_inputs),
-        groth16_vk,
-    )
+    if vk_root != VK_ROOT_6_1_0_BYTES {
+        return Err(Error::VkeyRootMismatch);
+    }
+
+    if exit_code != [0u8; 32] {
+        return Err(Error::ExitCodeMismatch);
+    }
+
+    let raw_proof = &proof[SP1_GROTH16_HEADER_LENGTH..];
+    let public_values = groth16_public_values(
+        sp1_vkey_hash,
+        sp1_public_inputs,
+        exit_code,
+        vk_root,
+        proof_nonce,
+    );
+    if verify_proof_raw(raw_proof, &public_values, groth16_vk).is_ok() {
+        return Ok(());
+    }
+
+    let public_values = groth16_public_values_blake3(
+        sp1_vkey_hash,
+        sp1_public_inputs,
+        exit_code,
+        vk_root,
+        proof_nonce,
+    );
+    verify_proof_raw(raw_proof, &public_values, groth16_vk)
 }

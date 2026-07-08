@@ -7,7 +7,11 @@ use solana_sdk::{
     signer::Signer,
     transaction::Transaction,
 };
-use sp1_sdk::{include_elf, utils, ProverClient, SP1ProofWithPublicValues, SP1Stdin};
+use sp1_sdk::{
+    include_elf, utils, Elf, HashableKey, ProveRequest, Prover, ProverClient, ProvingKey,
+    SP1ProofWithPublicValues, SP1Stdin,
+};
+use std::path::PathBuf;
 
 #[derive(clap::Parser)]
 #[command(name = "zkVM Proof Generator")]
@@ -22,7 +26,7 @@ struct Cli {
 }
 
 /// The ELF binary of the SP1 program.
-const ELF: &[u8] = include_elf!("fibonacci-program");
+const ELF: Elf = include_elf!("fibonacci-program");
 
 /// Invokes the solana program using Solana Program Test.
 async fn run_verify_instruction(groth16_proof: SP1Groth16Proof) {
@@ -55,7 +59,8 @@ async fn main() {
     utils::setup_logger();
 
     // Where to save / load the sp1 proof from.
-    let proof_file = "../../proofs/fibonacci_proof.bin";
+    let proof_file =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../proofs/fibonacci_proof.bin");
 
     // Parse command line arguments.
     let args = Cli::parse();
@@ -63,12 +68,13 @@ async fn main() {
     // Only generate a proof if the prove flag is set.
     if args.prove {
         // Initialize the prover client
-        let client = ProverClient::from_env();
-        let (pk, vk) = client.setup(ELF);
+        let client = ProverClient::from_env().await;
+        let pk = client.setup(ELF).await.expect("failed to setup prover");
+        let vk = pk.verifying_key();
 
         println!(
             "Program Verification Key Bytes {:?}",
-            sp1_sdk::HashableKey::bytes32(&vk)
+            HashableKey::bytes32(vk)
         );
 
         // In our SP1 program, compute the 20th fibonacci number.
@@ -77,17 +83,17 @@ async fn main() {
 
         // Generate a proof for the fibonacci program.
         let proof = client
-            .prove(&pk, &stdin)
+            .prove(&pk, stdin)
             .groth16()
-            .run()
+            .await
             .expect("Groth16 proof generation failed");
 
         // Save the generated proof to `proof_file`.
-        proof.save(proof_file).unwrap();
+        proof.save(&proof_file).unwrap();
     }
 
     // Load the proof from the file, and convert it to a Borsh-serializable `SP1Groth16Proof`.
-    let sp1_proof_with_public_values = SP1ProofWithPublicValues::load(proof_file).unwrap();
+    let sp1_proof_with_public_values = SP1ProofWithPublicValues::load(&proof_file).unwrap();
     let groth16_proof = SP1Groth16Proof {
         proof: sp1_proof_with_public_values.bytes(),
         sp1_public_inputs: sp1_proof_with_public_values.public_values.to_vec(),
